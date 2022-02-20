@@ -15,4 +15,69 @@ body {
       }
     } 
   }
+
+  & #static {
+    margin-top: 1em;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 1em;
+    & #nameservers {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      & li:not(:last-child) {
+        border-bottom: 1px solid black;
+      }
+    }
+  }
+
+  & #dynamic {
+    & #requests {
+      display: flex;
+      flex-direction: column;
+      & > .inner {
+        background-color: #2c3e50;
+        color: white;
+        position: relative;
+
+        & > #request-text {
+          position: relative;
+          z-index: 100;
+        }
+
+        & > .bg {
+          position: absolute;
+          left: 0;
+          top: 0;
+          bottom: 0;
+          background-color: darkolivegreen;
+          transition: width 0.5s ease-out;
+        }
+      }
+    }
+
+    & ul {
+      list-style: none;
+
+      & > li {
+        display: grid;
+        grid-template-columns: min-content auto;
+        gap: 1em;
+      }
+
+      & > li > * {
+        display: block;
+
+        &:first-child {
+          min-width: 300px;
+          text-align: end;
+        }
+
+        &:last-child {
+          text-align: start;
+        }
+      }
+    }
+  }
 }

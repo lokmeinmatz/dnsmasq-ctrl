@@ -1,113 +1,64 @@
-use std::sync::Arc;
-
 use warp::{Filter};
-use tokio::sync::{watch, mpsc};
-use tokio::io::{BufReader, AsyncBufReadExt};
 use std::convert::Infallible;
 
-#[derive(Debug)]
-enum DnsmasqState {
-    Uninited,
-    Active,
-    Error(String)
-}
+mod dnsmasq;
+mod line_parser;
+mod responses;
+use crate::dnsmasq::*;
 
-enum DnsmasqCommand {
-    Update
-}
-
-#[derive(Debug, Clone)]
-struct DnsmasqController {
-    watch_state: watch::Receiver<Box<DnsmasqState>>,
-    commands: mpsc::Sender<Box<DnsmasqCommand>>,
-    task_handle: Arc<tokio::task::JoinHandle<()>>
-}
-
-
-async fn dnsmasq_ctrl(state_tx: watch::Sender<Box<DnsmasqState>>, cmd_rx: mpsc::Receiver<Box<DnsmasqCommand>>) {
-    
-    let port: Option<usize> = std::env::var("DNSMASQ_PORT").ok().and_then(
-        |ps| str::parse::<usize>(&ps).ok()
-    );
-    
-    println!("starting dnsmasq");
-
-    
-    let mut command = tokio::process::Command::new("dnsmasq");
-    command.arg("--log-queries");
-    command.stdout(std::process::Stdio::piped());
-
-    if let Some(p) = port {
-        println!("custom port from DNSMASQ_PORT={}", p);
-        command.arg(format!("--port={}", p));
-    }
-
-    let proc = match 
-        command.spawn() {
-        Ok(p) => std::sync::Arc::new(tokio::sync::RwLock::new(p)),
-        Err(e) => {
-            eprintln!("Error starting dnsmasq: {:?}", e);
-            state_tx.send(Box::new(DnsmasqState::Error(e.to_string()))).unwrap();
-            return;
-        }
-    };
-
-    let p1 = proc.clone();
-    tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.unwrap();
-        let mut proc = p1.write().await;
-        if let Ok(None) = proc.try_wait() {
-            println!("Terminating dnsmasq");
-            proc.kill().await.unwrap();
-            println!("dnsmasq terminated");
-        }
-        std::process::exit(0);
-    });
-
-    let mut stdout = BufReader::new(proc.write().await.stdout.take().unwrap());
-    
-    while let Ok(None) = proc.write().await.try_wait() {
-        let mut line = String::new();
-        stdout.read_line(&mut line).await.unwrap();
-        println!("[dnsmasq] {}", line);
-    }
-    
-}
-
-impl DnsmasqController {
-    fn init() -> Self {
-        let (state_tx, state_rx) = watch::channel(Box::new(DnsmasqState::Uninited));
-        let (cmd_tx, cmd_rx) = mpsc::channel(16);
-
-        let task_handle = Arc::new(tokio::spawn(async move {
-            dnsmasq_ctrl(state_tx, cmd_rx).await
-        }));
-
-        return DnsmasqController {
-            watch_state: state_rx,
-            task_handle,
-            commands: cmd_tx
-        };
-    }
-
-
-}
 
 fn with_dns_controller(dns_controller: DnsmasqController) -> impl Filter<Extract = (DnsmasqController,), Error = Infallible> + Clone {
     warp::any().map(move || dns_controller.clone())
 }
 
-async fn get_api_state(dns: DnsmasqController) -> Result<impl warp::Reply, Infallible> {
-    Ok("unimplemented")
+async fn get_api_static(dns: DnsmasqController) -> Result<impl warp::Reply, Infallible> {
+    let state = dns.state.read().await;
+
+    let res = responses::StaticStateResponse {
+        cache_size: state.cache_size,
+        name_servers: &state.name_servers,
+        version: state.version.as_deref(),
+        mappings: state.addresses.clone()
+    };
+
+    return Ok(warp::reply::json(&res));
 }
 
 
+async fn get_api_dyn(dns: DnsmasqController) -> Result<impl warp::Reply, Infallible> {
+    let state = dns.state.read().await;
+
+    let res = responses::DynStateResponse {
+        num_hits: state.hit_rate.hits,
+        num_total: state.hit_rate.total_reqs,
+        percent_from_cache: state.hit_rate.get_ratio(),
+        top_query_domains: &state.query_domains,
+        top_query_sources: &state.query_sources,
+        top_query_types: &state.query_types
+    };
+
+    return Ok(warp::reply::json(&res));
+}
+
 /// mounted under /api
-fn build_api(dns_controller: DnsmasqController) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-    warp::any()
-        .and(with_dns_controller(dns_controller))
-        .and(warp::path("state").and(warp::get()).map(|| format!("test"))
-    )
+fn build_api(dns_controller: DnsmasqController) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
+    let state = 
+        // GET /api
+        warp::path::end().map(|| "api up")
+    .or(
+        // GET /api/state
+        warp::path("static")
+        .and(with_dns_controller(dns_controller.clone()))
+        .and(warp::get())
+        .and_then(get_api_static)
+    ).or(
+        warp::path("dynamic")
+        .and(with_dns_controller(dns_controller.clone()))
+        .and(warp::get())
+        .and_then(get_api_dyn)
+    );
+    
+    state
 }
 
 #[tokio::main]
@@ -125,11 +76,17 @@ async fn main() {
 
     let api = warp::path("api").and(build_api(dns_controller));
 
+    let port:u16 = std::env::var("WEB_PORT").ok().and_then(
+        |ps| str::parse::<u16>(&ps).ok()
+    ).unwrap_or(80);
+
+    println!("Running on port {}", port);
+
     warp::serve(health
         .or(frontend_assets)
         .or(api)
         .or(index)
     )
-    .run(([127, 0, 0, 1], 3030))
+    .run(([0, 0, 0, 0], port))
     .await;
 }

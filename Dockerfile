@@ -32,7 +32,8 @@ RUN apt-get update \
     && apt-get install -y ca-certificates tzdata dnsmasq \
     && rm -rf /var/lib/apt/lists/*
 
-EXPOSE 8000
+EXPOSE 80
+EXPOSE 53
 
 ENV TZ=Etc/UTC \
     APP_USER=appuser
@@ -41,11 +42,12 @@ RUN groupadd $APP_USER \
     && useradd -g $APP_USER $APP_USER \
     && mkdir -p ${APP}
 
+WORKDIR ${APP}
 COPY --from=builder ${APP}/target/release/dnsmasq-ctrl ${APP}/dnsmasq-ctrl
-COPY --from=frontend /srv/frontend/dist ${app}/frontend/dist
+RUN mkdir frontend
+COPY --from=frontend /srv/frontend/dist ${APP}/frontend/dist
 RUN chown -R $APP_USER:$APP_USER ${APP}
 
 USER $APP_USER
-WORKDIR ${APP}
 
 CMD ["./dnsmasq-ctrl"]
