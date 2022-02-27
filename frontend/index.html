@@ -11,18 +11,7 @@
 
 <body>
   <nav class="pure-menu pure-menu-horizontal">
-    <a href="#" class="pure-menu-heading pure-menu-link">BRAND</a>
-    <ul class="pure-menu-list">
-      <li class="pure-menu-item">
-        <a href="#" class="pure-menu-link">News</a>
-      </li>
-      <li class="pure-menu-item">
-        <a href="#" class="pure-menu-link">Sports</a>
-      </li>
-      <li class="pure-menu-item">
-        <a href="#" class="pure-menu-link">Finance</a>
-      </li>
-    </ul>
+    <a href="#" class="pure-menu-heading pure-menu-link">DNSMASQ stats</a>
   </nav>
   <div id="static">
     <div id="version">0.0</div>
@@ -38,13 +27,22 @@
         <span id="request-text"></span>
         <div class="bg"></div>
       </div>
+      <div id="timeline-parent">
+        <canvas id="timeline"></canvas>
+      </div>
     </div>
-    <ul id="domains">
-    </ul>
-    <ul id="clients">
-    </ul>
-    <ul id="type">
-    </ul>
+    <h2>tom 50 domains</h2>
+    <div class="grid-list" id="domains">
+    </div>
+    <h2>clients</h2>
+    <div class="grid-list" id="clients">
+    </div>
+    <h2>types</h2>
+    <div class="grid-list" id="type">
+    </div>
+    <h2>NXDOMAIN</h2>
+    <div class="grid-list" id="nxdomains">
+    </div>
   </div>
   <script type="module" src="/src/main.ts"></script>
 </body>

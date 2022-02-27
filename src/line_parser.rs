@@ -9,7 +9,7 @@ pub enum DnsmasqParsedLine {
     ReadHosts { path: PathBuf, address_count: u32 },
     Query { id: u64, source: String, query: String, domain: String, from: IpAddr },
     // Forwarded { id: u64, to: IpAddr },
-    Reply { id: u64, cached: bool, domain: String, result: IpAddr }
+    Reply { id: u64, cached: bool, domain: String, result: Option<IpAddr> }
 }
 
 pub struct DnsmasqLineParser {
@@ -64,14 +64,14 @@ impl DnsmasqLineParser {
                 id,
                 cached: true,
                 domain,
-                result: ip
+                result: Some(ip)
             });
         }
         
         if let Some(captures) = self.regex_reply.captures(line.as_ref()) {
             let id: u64 = captures.name("id")?.as_str().parse().ok()?;
             let domain: String = captures.name("domain")?.as_str().to_string();
-            let ip: IpAddr = IpAddr::from_str(captures.name("ip")?.as_str()).ok()?;
+            let ip: Option<IpAddr> = IpAddr::from_str(captures.name("ip")?.as_str()).ok();
 
             return Some(DnsmasqParsedLine::Reply {
                 id,

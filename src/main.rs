@@ -34,7 +34,9 @@ async fn get_api_dyn(dns: DnsmasqController) -> Result<impl warp::Reply, Infalli
         percent_from_cache: state.hit_rate.get_ratio(),
         top_query_domains: &state.query_domains,
         top_query_sources: &state.query_sources,
-        top_query_types: &state.query_types
+        top_query_types: &state.query_types,
+        unknown_domains: &state.nxdomain_replies,
+        lookup_timeline: &state.timeline
     };
 
     return Ok(warp::reply::json(&res));

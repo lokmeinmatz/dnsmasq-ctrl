@@ -1,3 +1,5 @@
+use serde::Serialize;
+use serde_derive::Serialize;
 use tokio::sync::{RwLock, mpsc};
 use tokio::io::{BufReader, AsyncBufReadExt};
 use std::collections::HashMap;
@@ -27,6 +29,45 @@ impl CacheHitsRate {
     }
 }
 
+#[derive(Debug)]
+pub struct Time(chrono::DateTime<chrono::Local>);
+
+impl From<chrono::DateTime<chrono::Local>> for Time {
+    fn from(i: chrono::DateTime<chrono::Local>) -> Self {
+        Time(i)
+    }
+}
+
+impl Serialize for Time {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer {
+        serializer.serialize_str(&self.0.to_rfc3339())
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct TimeBucket {
+    pub start: Time,
+    pub requests: u64
+}
+
+fn insert_into_timeline(timeline: &mut Vec<TimeBucket>, step: chrono::Duration) {
+    if timeline.is_empty() {
+        timeline.push( TimeBucket { start: chrono::Local::now().into(), requests: 1 } );
+        return;
+    }
+
+    let current_start = &timeline.last().unwrap().start;
+    let next_start = current_start.0.checked_add_signed(step).unwrap();
+    if next_start < chrono::Local::now() {
+        timeline.push( TimeBucket { start: chrono::Local::now().into(), requests: 1 } );
+        return;
+    }
+
+    timeline.last_mut().unwrap().requests += 1;
+}
+
 #[derive(Debug, Default)]
 pub struct DnsmasqState {
     pub state_enum: DnsmasqStateEnum, 
@@ -37,7 +78,9 @@ pub struct DnsmasqState {
     pub query_sources: HashMap<IpAddr, u64>,
     pub query_types: HashMap<String, u64>,
     pub query_domains: HashMap<String, u64>,
-    pub hit_rate: CacheHitsRate
+    pub hit_rate: CacheHitsRate,
+    pub nxdomain_replies: HashMap<String, u64>,
+    pub timeline: Vec<TimeBucket>
 }
 
 #[derive(Debug)]
@@ -162,18 +205,25 @@ println!("starting dnsmasq on {:?}", port);
                 // read data
                 eprintln!("parsing readHosts {:?} not implemented", path);
             },
-            Some(DnsmasqParsedLine::Query{ from, domain, source, query, ..}) => {
+            Some(DnsmasqParsedLine::Query{ from, domain, query, ..}) => {
                 let mut w_state = state.write().await;
                 w_state.query_domains.entry(domain).and_modify(|c| *c += 1).or_insert(1);
                 w_state.query_sources.entry(from).and_modify(|c| *c += 1).or_insert(1);
                 w_state.query_types.entry(query).and_modify(|c| *c += 1).or_insert(1);
+
+                insert_into_timeline(&mut w_state.timeline, chrono::Duration::minutes(60));
+                
             },
-            Some(DnsmasqParsedLine::Reply{ cached, ..}) => {
+            Some(DnsmasqParsedLine::Reply{ domain, cached, result, ..}) => {
                 let mut w_state = state.write().await;
                 if cached {
                     w_state.hit_rate.hit();
                 } else {
                     w_state.hit_rate.miss();
+                }
+
+                if result.is_none() {
+                    w_state.nxdomain_replies.entry(domain).and_modify(|c| *c += 1).or_insert(1);
                 }
             },
             None => {
