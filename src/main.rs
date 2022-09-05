@@ -1,6 +1,8 @@
 use warp::{Filter};
 use std::convert::Infallible;
 
+use serde_derive::Deserialize;
+
 mod dnsmasq;
 mod line_parser;
 mod responses;
@@ -12,7 +14,7 @@ fn with_dns_controller(dns_controller: DnsmasqController) -> impl Filter<Extract
 }
 
 async fn get_api_static(dns: DnsmasqController) -> Result<impl warp::Reply, Infallible> {
-    let state = dns.state.read().await;
+    let state = dns.state.lock().await;
 
     let res = responses::StaticStateResponse {
         cache_size: state.cache_size,
@@ -24,19 +26,22 @@ async fn get_api_static(dns: DnsmasqController) -> Result<impl warp::Reply, Infa
     return Ok(warp::reply::json(&res));
 }
 
+#[derive(Deserialize)]
+struct DynQuery {
+    timestamp: Option<u64>,
+    frame_size: u64
+}
 
-async fn get_api_dyn(dns: DnsmasqController) -> Result<impl warp::Reply, Infallible> {
-    let state = dns.state.read().await;
+async fn get_api_dyn(dns: DnsmasqController, dyn_query: DynQuery) -> Result<impl warp::Reply, Infallible> {
+    let timestamp = dyn_query.timestamp.unwrap_or(chrono::Utc::now().timestamp_millis() as u64);
+    let state = dns.state.lock().await;
+
+    state.
 
     let res = responses::DynStateResponse {
-        num_hits: state.hit_rate.hits,
-        num_total: state.hit_rate.total_reqs,
-        percent_from_cache: state.hit_rate.get_ratio(),
-        top_query_domains: &state.query_domains,
-        top_query_sources: &state.query_sources,
-        top_query_types: &state.query_types,
-        unknown_domains: &state.nxdomain_replies,
-        lookup_timeline: &state.timeline
+        frame_size: dyn_query.frame_size,
+        timestamp,
+
     };
 
     return Ok(warp::reply::json(&res));
@@ -57,6 +62,7 @@ fn build_api(dns_controller: DnsmasqController) -> impl Filter<Extract = (impl w
         warp::path("dynamic")
         .and(with_dns_controller(dns_controller.clone()))
         .and(warp::get())
+        .and(warp::query::<DynQuery>())
         .and_then(get_api_dyn)
     );
     

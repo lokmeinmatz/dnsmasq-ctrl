@@ -1,6 +1,7 @@
-use serde::Serialize;
-use serde_derive::Serialize;
-use tokio::sync::{RwLock, mpsc};
+use chrono::{Utc};
+use rusqlite::types::{ToSqlOutput, FromSql, FromSqlError};
+use rusqlite::{Connection, params, ToSql};
+use tokio::sync::{mpsc, Mutex};
 use tokio::io::{BufReader, AsyncBufReadExt};
 use std::collections::HashMap;
 use std::sync::{Arc};
@@ -29,58 +30,103 @@ impl CacheHitsRate {
     }
 }
 
+
 #[derive(Debug)]
-pub struct Time(chrono::DateTime<chrono::Local>);
-
-impl From<chrono::DateTime<chrono::Local>> for Time {
-    fn from(i: chrono::DateTime<chrono::Local>) -> Self {
-        Time(i)
-    }
-}
-
-impl Serialize for Time {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer {
-        serializer.serialize_str(&self.0.to_rfc3339())
-    }
-}
-
-#[derive(Debug, Serialize)]
-pub struct TimeBucket {
-    pub start: Time,
-    pub requests: u64
-}
-
-fn insert_into_timeline(timeline: &mut Vec<TimeBucket>, step: chrono::Duration) {
-    if timeline.is_empty() {
-        timeline.push( TimeBucket { start: chrono::Local::now().into(), requests: 1 } );
-        return;
-    }
-
-    let current_start = &timeline.last().unwrap().start;
-    let next_start = current_start.0.checked_add_signed(step).unwrap();
-    if next_start < chrono::Local::now() {
-        timeline.push( TimeBucket { start: chrono::Local::now().into(), requests: 1 } );
-        return;
-    }
-
-    timeline.last_mut().unwrap().requests += 1;
-}
-
-#[derive(Debug, Default)]
 pub struct DnsmasqState {
     pub state_enum: DnsmasqStateEnum, 
     pub version: Option<String>,
     pub cache_size: Option<u32>,
     pub name_servers: Vec<String>,
     pub addresses: HashMap<IpAddr, Vec<String>>,
+    pub sql_conn: Connection
+    /*,
     pub query_sources: HashMap<IpAddr, u64>,
     pub query_types: HashMap<String, u64>,
     pub query_domains: HashMap<String, u64>,
     pub hit_rate: CacheHitsRate,
     pub nxdomain_replies: HashMap<String, u64>,
-    pub timeline: Vec<TimeBucket>
+    pub timeline: Vec<TimeBucket> */
+}
+
+#[derive(Debug, PartialEq)]
+pub enum QueryState {
+    RUNNING = 0,
+    HIT = 1,
+    MISS = 2,
+    NX = 3
+}
+
+impl ToSql for QueryState {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::from(*self as u8))
+    }
+}
+
+impl FromSql for QueryState {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        value.as_i64().and_then(|s| {
+            match s {
+                0 => Ok(QueryState::RUNNING),
+                1 => Ok(QueryState::HIT),
+                2 => Ok(QueryState::MISS),
+                3 => Ok(QueryState::NX),
+                _ => Err(FromSqlError::InvalidType)
+            }
+        })
+    }
+}
+
+impl DnsmasqState {
+    pub fn empty() -> Self {
+
+        let mut conn = Connection::open_in_memory().unwrap();
+        // timestamp UNIX ms, 
+        // state 0 = running, 1 = hit, 2 = miss, 3 = nx
+        conn.execute("CREATE TABLE dns_queries ( id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp INTEGER NOT NULL, type TEXT NOT NULL, domain TEXT NOT NULL, state INTEGER NOT NULL, source TEXT NOT NULL, duration INTEGER);", params![]).unwrap();
+
+        Self {
+            addresses: HashMap::new(),
+            cache_size: None,
+            name_servers: vec![],
+            version: None,
+            state_enum: DnsmasqStateEnum::Uninited,
+            sql_conn: conn
+        }
+    }
+
+    pub fn start_query(&self, id: u64, source: String, domain: String, query_type: String) {
+        let now = Utc::now().timestamp_millis();
+        match self.sql_conn.execute("INSERT INTO dns_queries (id, timestamp, type, domain, state, source) VALUES (?1, ?2, ?3, ?4, ?5, ?6);", params![
+            id, now, query_type, domain, QueryState::RUNNING, source
+        ]) {
+            Ok(_) => {},
+            Err(e) => eprintln!("Error while inserting: {:?}", e)
+        }
+    }
+
+    pub fn finish_query(&self, id: u64, state: QueryState) {
+        let tx = self.sql_conn.transaction().unwrap();
+        let (timestamp, curr_state) = match tx.query_row("SELECT (id, timestamp, state) FROM dns_queries WHERE id = ?1", params![id], |row| {
+            let ts: u64 = row.get(1)?;
+            let curr_state: QueryState = row.get(2)?;
+            Ok((ts, curr_state))
+        }) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("Error while finding query {:?} : {:?}", id, e);
+                return;
+            }
+        };
+
+        if curr_state != QueryState::RUNNING {
+            eprintln!("query state was not running when finish_query was called");
+        }
+
+        let dur = Utc::now().timestamp_millis() as u64 - timestamp;
+        tx.execute("UPDATE dns_queries SET state = ?1, duration = ?2 WHERE id = ?3", params![
+            state, dur, id
+        ]).unwrap();
+    }
 }
 
 #[derive(Debug)]
@@ -90,13 +136,7 @@ pub enum DnsmasqStateEnum {
     Error(String)
 }
 
-impl Default for DnsmasqStateEnum {
-    fn default() -> Self {
-        Self::Uninited
-    }
-}
-
-type StateRef = Arc<RwLock<DnsmasqState>>;
+type StateRef = Arc<Mutex<DnsmasqState>>;
 
 pub enum DnsmasqCommand {
     Update
@@ -112,7 +152,7 @@ pub struct DnsmasqController {
 
 impl DnsmasqController {
     pub fn init() -> Self {
-        let state = Arc::new(RwLock::new(DnsmasqState::default()));
+        let state = Arc::new(Mutex::new(DnsmasqState::empty()));
         let (cmd_tx, cmd_rx) = mpsc::channel(16);
 
         let controller_state = state.clone();
@@ -158,7 +198,7 @@ println!("starting dnsmasq on {:?}", port);
         Ok(p) => std::sync::Arc::new(tokio::sync::RwLock::new(p)),
         Err(e) => {
             eprintln!("Error starting dnsmasq: {:?}", e);
-            state.write().await.state_enum = DnsmasqStateEnum::Error(e.to_string());
+            state.lock().await.state_enum = DnsmasqStateEnum::Error(e.to_string());
             return;
         }
     };
@@ -192,39 +232,38 @@ println!("starting dnsmasq on {:?}", port);
 
         match parser.parse_line(&line) {
             Some(DnsmasqParsedLine::Start { version, cache_size }) => {
-                let mut w_state = state.write().await;
-                w_state.cache_size = Some(cache_size);
-                w_state.version = Some(version);
-                w_state.state_enum = DnsmasqStateEnum::Active;
+                let mut state_guard = state.lock().await;
+                state_guard.cache_size = Some(cache_size);
+                state_guard.version = Some(version);
+                state_guard.state_enum = DnsmasqStateEnum::Active;
             },
             Some(DnsmasqParsedLine::NameServer(server)) => {
-                let mut w_state = state.write().await;
-                w_state.name_servers.push(server);
+                let mut state_guard = state.lock().await;
+                state_guard.name_servers.push(server);
             },
             Some(DnsmasqParsedLine::ReadHosts{ path, .. }) => {
                 // read data
                 eprintln!("parsing readHosts {:?} not implemented", path);
             },
-            Some(DnsmasqParsedLine::Query{ from, domain, query, ..}) => {
-                let mut w_state = state.write().await;
-                w_state.query_domains.entry(domain).and_modify(|c| *c += 1).or_insert(1);
-                w_state.query_sources.entry(from).and_modify(|c| *c += 1).or_insert(1);
-                w_state.query_types.entry(query).and_modify(|c| *c += 1).or_insert(1);
+            Some(DnsmasqParsedLine::Query{ id, from, domain, query, source}) => {
+                let mut state_guard = state.lock().await;
+                state_guard.start_query(id, source, domain, query);
 
-                insert_into_timeline(&mut w_state.timeline, chrono::Duration::minutes(60));
-                
             },
-            Some(DnsmasqParsedLine::Reply{ domain, cached, result, ..}) => {
-                let mut w_state = state.write().await;
+            Some(DnsmasqParsedLine::Reply{ id, domain, cached, result, ..}) => {
+                let state_guard = state.lock().await;
+                let mut state = QueryState::RUNNING;
                 if cached {
-                    w_state.hit_rate.hit();
+                    state = QueryState::HIT;
                 } else {
-                    w_state.hit_rate.miss();
+                    state = QueryState::MISS;
                 }
 
                 if result.is_none() {
-                    w_state.nxdomain_replies.entry(domain).and_modify(|c| *c += 1).or_insert(1);
+                    state = QueryState::NX;
                 }
+
+                state_guard.finish_query(id, state)
             },
             None => {
                 eprintln!("unhandled line");

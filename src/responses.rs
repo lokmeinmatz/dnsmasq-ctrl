@@ -2,7 +2,6 @@ use std::{collections::HashMap, net::IpAddr};
 
 use serde_derive::Serialize;
 
-use crate::dnsmasq::TimeBucket;
 
 
 #[derive(Debug, Serialize)]
@@ -17,13 +16,13 @@ pub struct StaticStateResponse<'a> {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DynStateResponse<'a> {
+pub struct DynStateResponse {
+    /// UNIX ms
+    pub timestamp: u64,
+    /// ms
+    pub frame_size: u64,
     pub num_hits: u64,
-    pub num_total: u64,
+    pub num_reqs: u64,
+    pub num_since_start: u64,
     pub percent_from_cache: f64,
-    pub top_query_domains: &'a HashMap<String, u64>,
-    pub top_query_types: &'a HashMap<String, u64>,
-    pub top_query_sources: &'a HashMap<IpAddr, u64>,
-    pub unknown_domains: &'a HashMap<String, u64>,
-    pub lookup_timeline: &'a Vec<TimeBucket>
 }
